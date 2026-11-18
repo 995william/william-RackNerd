@@ -12,10 +12,13 @@ import os
 import sys
 import json
 import re
+import time
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
+
+from hub_reporter import report_to_hub
 
 # 解决 Windows 控制台 utf-8 编码问题
 if hasattr(sys.stdout, "reconfigure"):
@@ -307,6 +310,7 @@ def check_nodeseek():
     return items_found
 
 def main():
+    start_ts = time.time()
     print(f"[{get_beijing_time()}] 开始执行 RackNerd 监控任务 (V2)...")
 
     # 测试模式
@@ -329,61 +333,107 @@ def main():
         return
 
     history = load_history()
-    seen_links = set(history.get("seen_links", []))
-    is_initial_run = (len(seen_links) == 0)
+    history.setdefault("seen_links", [])
 
-    all_items = []
+    try:
+        seen_links = set(history.get("seen_links", []))
+        is_initial_run = (len(seen_links) == 0)
 
-    # 1. 抓取 LowEndBox
-    print("[INFO] 正在检查 LowEndBox RackNerd 专栏...")
-    leb_items = check_lowendbox()
-    all_items.extend(leb_items)
-    print(f"[INFO] LowEndBox 抓取到 {len(leb_items)} 条记录")
+        all_items = []
 
-    # 2. 抓取 LowEndTalk
-    print("[INFO] 正在检查 LowEndTalk Offers 专区...")
-    let_items = check_lowendtalk()
-    all_items.extend(let_items)
-    print(f"[INFO] LowEndTalk 抓取到 {len(let_items)} 条相关记录")
+        # 1. 抓取 LowEndBox
+        print("[INFO] 正在检查 LowEndBox RackNerd 专栏...")
+        leb_items = check_lowendbox()
+        all_items.extend(leb_items)
+        print(f"[INFO] LowEndBox 抓取到 {len(leb_items)} 条记录")
 
-    # 3. 抓取 NodeSeek
-    print("[INFO] 正在检查 NodeSeek 社区动态...")
-    ns_items = check_nodeseek()
-    all_items.extend(ns_items)
-    print(f"[INFO] NodeSeek 抓取到 {len(ns_items)} 条相关记录")
+        # 2. 抓取 LowEndTalk
+        print("[INFO] 正在检查 LowEndTalk Offers 专区...")
+        let_items = check_lowendtalk()
+        all_items.extend(let_items)
+        print(f"[INFO] LowEndTalk 抓取到 {len(let_items)} 条相关记录")
 
-    new_items = []
-    for item in all_items:
-        link = item["link"]
-        if link not in seen_links:
-            new_items.append(item)
-            seen_links.add(link)
+        # 3. 抓取 NodeSeek
+        print("[INFO] 正在检查 NodeSeek 社区动态...")
+        ns_items = check_nodeseek()
+        all_items.extend(ns_items)
+        print(f"[INFO] NodeSeek 抓取到 {len(ns_items)} 条相关记录")
 
-    print(f"[INFO] 本次检测发现新内容共 {len(new_items)} 条")
+        new_items = []
+        for item in all_items:
+            link = item["link"]
+            if link not in seen_links:
+                new_items.append(item)
+                seen_links.add(link)
 
-    # 首次初始化运行
-    if is_initial_run:
-        print("[INFO] 首次初始化：将已有数据作为基准线，记录入库。")
-        history["seen_links"] = list(seen_links)
-        save_history(history)
-        return
+        new_count = len(new_items)
+        print(f"[INFO] 本次检测发现新内容共 {new_count} 条")
 
-    # 非首次运行：逐条推送新促销
-    for item in new_items:
-        send_wechat_notification(
-            title=item["title"],
-            source=item["source"],
-            link=item["link"],
-            pub_date=item.get("pub_date", ""),
-            parsed_info=item.get("parsed"),
-            extra_summary=item.get("summary", "")
+        # 首次初始化运行
+        if is_initial_run:
+            print("[INFO] 首次初始化：将已有数据作为基准线，记录入库。")
+            history["seen_links"] = list(seen_links)
+            save_history(history)
+            duration_ms = max(0, int((time.time() - start_ts) * 1000))
+            report_to_hub(
+                project_slug="racknerd",
+                status="success",
+                summary=f"巡检完成，首次基准线入库 {len(history['seen_links'])} 条",
+                duration_ms=duration_ms,
+                asset_text=f"已追踪 {len(history['seen_links'])} 款",
+                reward_total=0.0,
+                balance_total=float(len(history["seen_links"])),
+            )
+            return
+
+        # 非首次运行：发现新促销时立即推送企业微信提醒
+        for item in new_items:
+            send_wechat_notification(
+                title=item["title"],
+                source=item["source"],
+                link=item["link"],
+                pub_date=item.get("pub_date", ""),
+                parsed_info=item.get("parsed"),
+                extra_summary=item.get("summary", "")
+            )
+
+        if new_items:
+            history["seen_links"] = list(seen_links)
+            save_history(history)
+        else:
+            print("[INFO] 暂无新大促上线，巡检完成。")
+
+        card_lines = [
+            f"RackNerd 促销巡检完成（LowEndBox {len(leb_items)} / LowEndTalk {len(let_items)} / NodeSeek {len(ns_items)}）",
+            f"本次新增优惠：{new_count} 条 ｜ 累计追踪：{len(history['seen_links'])} 款",
+        ]
+        for idx, it in enumerate(new_items[:5], 1):
+            card_lines.append(f"{idx}. [{it['source']}] {it['title']} -> {it['link']}")
+
+        duration_ms = max(0, int((time.time() - start_ts) * 1000))
+        report_to_hub(
+            project_slug="racknerd",
+            status="success",
+            summary=f"巡检完成，新增优惠 {new_count} 条",
+            duration_ms=duration_ms,
+            asset_text=f"已追踪 {len(history['seen_links'])} 款" + (f" (+{new_count})" if new_count else ""),
+            reward_total=float(new_count),
+            balance_total=float(len(history["seen_links"])),
+            raw_card="\n".join(card_lines),
         )
-
-    if new_items:
-        history["seen_links"] = list(seen_links)
-        save_history(history)
-    else:
-        print("[INFO] 暂无新大促上线，巡检完成。")
+    except Exception as exc:
+        duration_ms = max(0, int((time.time() - start_ts) * 1000))
+        report_to_hub(
+            project_slug="racknerd",
+            status="failed",
+            summary=f"巡检异常: {exc}",
+            duration_ms=duration_ms,
+            asset_text=f"已追踪 {len(history['seen_links'])} 款",
+            reward_total=0.0,
+            balance_total=float(len(history["seen_links"])),
+            raw_card=f"RackNerd 巡检执行异常: {exc}",
+        )
+        raise
 
 if __name__ == "__main__":
     main()

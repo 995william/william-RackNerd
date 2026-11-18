@@ -1,35 +1,36 @@
-name: RackNerd Promotion Monitor
+name: RackNerd 大促与补货自动巡检
 
+# 已统一纳入集中管控中枢 (https://checkin.wwcoder.top) 按 interval@60 每小时准点唤醒调度
 on:
-  schedule:
-    # 避开整点与整20分高峰拥堵（例如 0, 20, 40 分全网拥堵会被 GitHub 丢弃），采用非对称分钟偏移
-    - cron: '7,27,47 * * * *'
-  workflow_dispatch: # 支持手动点击或通过 GitHub API 随时外部触发
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   monitor:
+    name: 执行优惠监控与历史归档
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: 配置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Run Monitor Script
+      - name: 执行 RackNerd 促销巡检脚本
         env:
           QYWX_WEBHOOK: ${{ secrets.QYWX_WEBHOOK }}
+          CHECKIN_HUB_URL: "https://checkin.wwcoder.top"
+          CHECKIN_HUB_TOKEN: ${{ secrets.CHECKIN_HUB_TOKEN }}
         run: |
           python main.py
 
-      - name: Commit and Push History
+      - name: 提交并推送促销历史记录
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add history.json
-          git diff --staged --quiet || (git commit -m "chore: update promotion history [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "chore: 更新促销监控历史记录 [skip ci]" && git push)
